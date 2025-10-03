@@ -293,7 +293,7 @@ body {
 }
 
 .risk-score-value {
-  font-size: 4rem;
+  font-size: 3rem;
   font-weight: bold;
   margin-bottom: 0.5rem;
 }
@@ -302,20 +302,27 @@ body {
 .risk-score-value.high { color: var(--high-risk); }
 
 .risk-score-label {
-  font-size: 1.5rem;
+  font-size: 1.25rem;
   font-weight: 300;
 }
 
 .metric {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-size: 1.1rem;
-  padding: 0.5rem 0;
+  padding: 0.75rem 0;
   border-bottom: 1px solid #eee;
 }
 .metric:last-child {
     border-bottom: none;
 }
+
+.risk-text-low { color: var(--low-risk); }
+.risk-text-medium { color: var(--medium-risk); }
+.risk-text-high { color: var(--high-risk); }
+.risk-text-unknown { color: #888; }
+
 
 /* Charts */
 .chart-container {
@@ -393,7 +400,12 @@ body {
     z-index: 1000;
     opacity: 0;
     transition: opacity 0.5s, top 0.5s;
+    background-color: #333; /* Fallback */
 }
+.notification.low { background-color: var(--low-risk); }
+.notification.medium { background-color: var(--medium-risk); }
+.notification.high { background-color: var(--high-risk); }
+
 .notification.show {
     opacity: 1;
     top: 40px;

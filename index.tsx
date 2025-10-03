@@ -9,6 +9,9 @@ type GameState = "not_started" | "playing" | "completed";
 type GameScore = { score: number; attempts: number; time: number; date: Date };
 type Sentiment = "Positive" | "Neutral" | "Negative";
 type RiskLevel = "Low" | "Medium" | "High";
+type ConversationStage = "greeting" | "memory_probe" | "social_probe" | "recommendation" | "free_chat";
+type RiskFactor = "Low" | "Medium" | "High" | "Unknown";
+type ScreeningResult = { memory: RiskFactor, social: RiskFactor };
 
 const MOCK_GAME_HISTORY: GameScore[] = [
   { score: 85, attempts: 10, time: 60, date: new Date(Date.now() - 86400000 * 3) },
@@ -25,6 +28,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 const PieChart = ({ data }: { data: { [key: string]: number } }) => {
   const colors = { Positive: "#4caf50", Neutral: "#ffc107", Negative: "#f44336" };
   const total = Object.values(data).reduce((sum, value) => sum + value, 0);
+  if (total === 0) return <p>No sentiment data yet.</p>;
   let cumulativePercent = 0;
   const segments = Object.entries(data).map(([key, value]) => {
     const percent = (value / total) * 100;
@@ -142,33 +146,38 @@ const WordMatchingGame = ({ onGameComplete, onExit }) => {
 
 
 // --- VIEWS --- //
-const SeniorView = ({ setGameHistory, setSentimentData }) => {
+const SeniorView = ({ setGameHistory, setSentimentData, setScreeningResult }) => {
   const [messages, setMessages] = useState<Message[]>([
-    { sender: 'ai', text: "Hello! I'm Elara, your personal companion. How are you feeling today? You can chat with me, or we could try a fun memory game like Word Matching or Daily Trivia.", id: 0 },
+    { sender: 'ai', text: "Good morning! I'm Elara, your personal companion. How are you feeling today?", id: 0 },
   ]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [gameState, setGameState] = useState<GameState>("not_started");
+  const [conversationStage, setConversationStage] = useState<ConversationStage>("greeting");
   const chatWindowRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     chatWindowRef.current?.scrollTo(0, chatWindowRef.current.scrollHeight);
   }, [messages]);
 
-  const analyzeSentiment = async (text: string): Promise<Sentiment> => {
+  const analyzeResponseType = async (text: string, type: 'memory' | 'social'): Promise<RiskFactor> => {
+      let prompt = "";
+      if (type === 'memory') {
+          prompt = `A senior was asked what they had for breakfast to check their short-term memory. Their response was: "${text}". Analyze this for memory gaps. Respond with only one word: 'Low' for a clear response, 'Medium' for a vague or hesitant response, or 'High' for a response indicating they don't remember (e.g., "I don't know").`;
+      } else { // social
+          prompt = `A senior was asked if they have spoken with friends or family this week. Their response was: "${text}". Analyze this for social isolation risk. Respond with only one word: 'Low' for a positive social connection, 'Medium' for an ambiguous response, or 'High' for a response indicating loneliness or lack of contact.`;
+      }
+
       try {
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: `Analyze the sentiment of this text: "${text}". Respond with only one word: Positive, Neutral, or Negative.`
-        });
-        const sentiment = response.text.trim();
-        if (["Positive", "Neutral", "Negative"].includes(sentiment)) {
-            return sentiment as Sentiment;
+        const response = await ai.models.generateContent({ model: "gemini-2.5-flash", contents: prompt });
+        const result = response.text.trim();
+        if (["Low", "Medium", "High"].includes(result)) {
+            return result as RiskFactor;
         }
       } catch (error) {
-        console.error("Sentiment analysis failed:", error);
+        console.error(`AI analysis failed for ${type}:`, error);
       }
-      return "Neutral";
+      return "Unknown";
   };
   
   const sendMessage = async (e?: React.FormEvent) => {
@@ -177,28 +186,56 @@ const SeniorView = ({ setGameHistory, setSentimentData }) => {
 
     const userMessage: Message = { sender: 'user', text: input, id: Date.now() };
     setMessages(prev => [...prev, userMessage]);
+    const currentInput = input;
     setInput("");
     setIsLoading(true);
 
-    // Analyze sentiment and update caregiver data
-    const sentiment = await analyzeSentiment(userMessage.text);
-    setSentimentData(prev => ({...prev, [sentiment]: (prev[sentiment] || 0) + 1}));
-
+    // General Sentiment Analysis
     try {
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: `You are Elara, a friendly AI companion for seniors. You are supportive and encouraging. A senior just said: "${userMessage.text}". Keep your response concise, friendly, and use simple language. If they ask for a game, offer 'Word Matching' or 'Daily Trivia'.`
+        const sentimentResponse = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: `Analyze the sentiment of this text: "${currentInput}". Respond with only one word: Positive, Neutral, or Negative.`
         });
-      
-      const aiMessage: Message = { sender: 'ai', text: response.text, id: Date.now() + 1 };
-      setMessages(prev => [...prev, aiMessage]);
+        const sentiment = sentimentResponse.text.trim() as Sentiment;
+        if (["Positive", "Neutral", "Negative"].includes(sentiment)) {
+            setSentimentData(prev => ({...prev, [sentiment]: (prev[sentiment] || 0) + 1}));
+        }
     } catch (error) {
-      console.error("Error fetching AI response:", error);
-      const errorMessage: Message = { sender: 'ai', text: "I'm having a little trouble connecting right now. Let's try again in a moment.", id: Date.now() + 1 };
-      setMessages(prev => [...prev, errorMessage]);
-    } finally {
-      setIsLoading(false);
+        console.error("Sentiment analysis failed:", error);
     }
+    
+    // Structured Conversation Flow
+    let aiResponseText = "";
+    try {
+        if (conversationStage === 'greeting') {
+            aiResponseText = "I'm glad to hear that. To help keep our minds sharp, would you mind telling me what you had for breakfast this morning?";
+            setConversationStage('memory_probe');
+        } else if (conversationStage === 'memory_probe') {
+            const memoryRisk = await analyzeResponseType(currentInput, 'memory');
+            setScreeningResult(prev => ({...prev, memory: memoryRisk}));
+            aiResponseText = "Thank you for sharing. Staying connected with loved ones is important too. Have you had a chance to speak with any friends or family this week?";
+            setConversationStage('social_probe');
+        } else if (conversationStage === 'social_probe') {
+            const socialRisk = await analyzeResponseType(currentInput, 'social');
+            setScreeningResult(prev => ({...prev, social: socialRisk}));
+            aiResponseText = "I appreciate you talking with me. Keeping our minds and social lives active is so beneficial. How about a fun Word Matching game to get the day started?";
+            setConversationStage('recommendation');
+        } else { // recommendation or free_chat
+             const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: `You are Elara, a friendly AI companion for seniors. You are supportive and encouraging. A senior just said: "${currentInput}". Keep your response concise, friendly, and use simple language. If they ask for a game, offer 'Word Matching' or 'Daily Trivia'.`
+            });
+            aiResponseText = response.text;
+            setConversationStage('free_chat');
+        }
+    } catch(error) {
+        console.error("Error fetching AI response:", error);
+        aiResponseText = "I'm having a little trouble connecting right now. Let's try again in a moment.";
+    }
+
+    const aiMessage: Message = { sender: 'ai', text: aiResponseText, id: Date.now() + 1 };
+    setMessages(prev => [...prev, aiMessage]);
+    setIsLoading(false);
   };
   
   const handleGameComplete = (scoreData: GameScore) => {
@@ -253,19 +290,29 @@ const SeniorView = ({ setGameHistory, setSentimentData }) => {
 };
 
 
-// FIX: Added explicit types for the `gameHistory` and `sentimentData` props to resolve TypeScript errors with arithmetic operations on values that were previously inferred as `unknown`.
-const CaregiverView = ({ gameHistory, sentimentData }: { gameHistory: GameScore[], sentimentData: Record<Sentiment, number> }) => {
+const CaregiverView = ({ gameHistory, sentimentData, screeningResult }: { gameHistory: GameScore[], sentimentData: Record<Sentiment, number>, screeningResult: ScreeningResult }) => {
     const [riskScore, setRiskScore] = useState<number>(75);
     const [riskLevel, setRiskLevel] = useState<RiskLevel>("Low");
     const [notification, setNotification] = useState<{ message: string; level: RiskLevel } | null>(null);
 
     useEffect(() => {
-        // Simple risk calculation logic
-        const latestGameScore = gameHistory.length > 0 ? gameHistory[gameHistory.length - 1].score : 70;
-        const totalSentiments = Object.values(sentimentData).reduce((a, b) => a + b, 0);
-        const positiveRatio = totalSentiments > 0 ? (sentimentData.Positive / totalSentiments) : 0.5;
+        // More sophisticated risk calculation
+        const latestGameScore = gameHistory.length > 0 ? gameHistory[gameHistory.length - 1].score : 75;
         
-        const calculatedScore = Math.round(latestGameScore * 0.6 + positiveRatio * 100 * 0.4);
+        const totalSentiments = Object.values(sentimentData).reduce((a, b) => a + b, 0);
+        const positiveRatio = totalSentiments > 0 ? (sentimentData.Positive / totalSentiments) : 0.7;
+
+        let screeningScore = 100;
+        if (screeningResult.memory === 'Medium') screeningScore -= 25;
+        if (screeningResult.memory === 'High') screeningScore -= 50;
+        if (screeningResult.social === 'Medium') screeningScore -= 15;
+        if (screeningResult.social === 'High') screeningScore -= 30;
+
+        const calculatedScore = Math.round(
+            (latestGameScore * 0.4) + 
+            (positiveRatio * 100 * 0.3) +
+            (screeningScore * 0.3)
+        );
         setRiskScore(calculatedScore);
 
         let newLevel: RiskLevel;
@@ -279,26 +326,49 @@ const CaregiverView = ({ gameHistory, sentimentData }: { gameHistory: GameScore[
         }
         setRiskLevel(newLevel);
 
-    }, [gameHistory, sentimentData]);
+    }, [gameHistory, sentimentData, screeningResult]);
 
-    const riskColorClass = riskLevel.toLowerCase();
+    const riskColorClass = (risk: RiskFactor | RiskLevel) => risk.toLowerCase();
 
     return (
         <div>
              {notification && (
-                <div className={`notification ${riskColorClass} show`} style={{backgroundColor: `var(--${riskColorClass}-risk)`}}>
+                <div className={`notification ${riskColorClass(notification.level)} show`}>
                     {notification.message}
                 </div>
             )}
             <div className="dashboard-grid">
                 <div className="dashboard-card risk-score-display">
-                    <h3>Cognitive & Social Risk</h3>
-                    <div className={`risk-score-value ${riskColorClass}`}>{riskLevel}</div>
+                    <h3>Overall Cognitive Risk</h3>
+                    <div className={`risk-score-value ${riskColorClass(riskLevel)}`}>{riskLevel}</div>
                     <div className="risk-score-label">(Score: {riskScore})</div>
                 </div>
                 <div className="dashboard-card">
-                    <h3>Key Metrics</h3>
+                    <h3>Daily Check-in</h3>
                     <div className="metric">
+                        <span>Short-term Memory</span>
+                        <strong className={`risk-text-${riskColorClass(screeningResult.memory)}`}>{screeningResult.memory}</strong>
+                    </div>
+                     <div className="metric">
+                        <span>Social Connection</span>
+                        <strong className={`risk-text-${riskColorClass(screeningResult.social)}`}>{screeningResult.social}</strong>
+                    </div>
+                </div>
+                 <div className="dashboard-card">
+                    <h3>Engagement (Messages/Day)</h3>
+                    <BarChart data={MOCK_ENGAGEMENT} />
+                </div>
+                <div className="dashboard-card">
+                    <h3>Memory Game Performance</h3>
+                    <LineChart data={gameHistory} />
+                </div>
+                <div className="dashboard-card">
+                    <h3>Sentiment Trend</h3>
+                    <PieChart data={sentimentData} />
+                </div>
+                 <div className="dashboard-card">
+                    <h3>Key Metrics</h3>
+                     <div className="metric">
                         <span>Avg. Game Score</span>
                         <strong>{gameHistory.length > 0 ? Math.round(gameHistory.reduce((a, b) => a + b.score, 0) / gameHistory.length) : 'N/A'}</strong>
                     </div>
@@ -312,18 +382,6 @@ const CaregiverView = ({ gameHistory, sentimentData }: { gameHistory: GameScore[
                         </strong>
                     </div>
                 </div>
-                <div className="dashboard-card">
-                    <h3>Engagement (Messages/Day)</h3>
-                    <BarChart data={MOCK_ENGAGEMENT} />
-                </div>
-                <div className="dashboard-card">
-                    <h3>Memory Game Performance</h3>
-                    <LineChart data={gameHistory} />
-                </div>
-                <div className="dashboard-card">
-                    <h3>Sentiment Trend</h3>
-                    <PieChart data={sentimentData} />
-                </div>
             </div>
         </div>
     );
@@ -334,6 +392,8 @@ const App = () => {
   const [view, setView] = useState<View>("senior");
   const [gameHistory, setGameHistory] = useState<GameScore[]>(MOCK_GAME_HISTORY);
   const [sentimentData, setSentimentData] = useState(MOCK_SENTIMENT_DATA);
+  const [screeningResult, setScreeningResult] = useState<ScreeningResult>({ memory: 'Unknown', social: 'Unknown' });
+
 
   return (
     <>
@@ -360,9 +420,9 @@ const App = () => {
       </header>
       <main className="main-content">
         {view === "senior" ? (
-          <SeniorView setGameHistory={setGameHistory} setSentimentData={setSentimentData} />
+          <SeniorView setGameHistory={setGameHistory} setSentimentData={setSentimentData} setScreeningResult={setScreeningResult} />
         ) : (
-          <CaregiverView gameHistory={gameHistory} sentimentData={sentimentData} />
+          <CaregiverView gameHistory={gameHistory} sentimentData={sentimentData} screeningResult={screeningResult} />
         )}
       </main>
     </>
